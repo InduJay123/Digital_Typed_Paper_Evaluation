@@ -1,0 +1,914 @@
+{
+  "name": "CCO Written PDF AI Marking - Optimized v3",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cco-mark-written-pdf",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b8a07bf7-36ef-4aa1-b6e0-10cdec234248",
+      "name": "Mark Written PDF Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        260
+      ],
+      "webhookId": "cco-mark-written-pdf"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const body = $json.body ?? $json;\nconst headers = $json.headers ?? {};\nconst expectedSecret = String($vars.N8N_WEBHOOK_SECRET || '').trim();\nif (expectedSecret) {\n  const provided = String(headers['x-cco-webhook-secret'] || headers['X-CCO-Webhook-Secret'] || '').trim();\n  if (provided !== expectedSecret) throw new Error('Unauthorized webhook request.');\n}\nconst attempt_id = String(body.attempt_id || '').trim();\nconst upload_id = String(body.upload_id || '').trim();\nconst uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\nif (!uuidRe.test(attempt_id)) throw new Error('Valid attempt_id is required.');\nif (!uuidRe.test(upload_id)) throw new Error('Valid upload_id is required.');\nreturn { json: { attempt_id, upload_id } };"
+      },
+      "id": "ec5c00e1-4ef0-4d2a-a497-7a559d0b4990",
+      "name": "Validate Marking Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL + '/rest/v1/rpc/rpc_marking_get_context' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ p_attempt_id:$('Validate Marking Input').item.json.attempt_id, p_upload_id:$('Validate Marking Input').item.json.upload_id }) }}",
+        "options": {}
+      },
+      "id": "8e243012-ee2b-4433-84b1-5b55ea04a54e",
+      "name": "Load Marking Context RPC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        440,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL + '/rest/v1/rpc/rpc_marking_update_upload_status' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ p_upload_id:$('Validate Marking Input').item.json.upload_id, p_processing_status:'quality_checking' }) }}",
+        "options": {}
+      },
+      "id": "b26605c7-f4db-42e1-a21e-20a1761735e0",
+      "name": "Set Quality Checking RPC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        660,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok:true, attempt_id:$('Validate Marking Input').item.json.attempt_id, upload_id:$('Validate Marking Input').item.json.upload_id, status:'processing', message:'Single-pass PDF quality check + handwriting extraction started. Written marking will use extracted text only.' }) }}",
+        "options": {}
+      },
+      "id": "f98bce75-e9c7-479f-b0b9-af6bc01a6c74",
+      "name": "Acknowledge Processing",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        880,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ctx = $('Load Marking Context RPC').item.json;\nconst bucket = ctx.upload?.storage_bucket;\nconst storagePath = ctx.upload?.storage_path;\nif (!bucket) throw new Error('Storage bucket is missing.');\nif (!storagePath) throw new Error('Storage path is missing.');\nconst encodedPath = String(storagePath).split('/').map(segment => encodeURIComponent(segment)).join('/');\nconst supabaseUrl = String($vars.SUPABASE_URL || '').replace(/\\/$/, '');\nif (!supabaseUrl) throw new Error('SUPABASE_URL n8n variable is missing.');\nreturn {\n  json: {\n    download_url: `${supabaseUrl}/storage/v1/object/authenticated/${encodeURIComponent(bucket)}/${encodedPath}`,\n    file_name: ctx.upload.original_file_name || 'answer.pdf',\n    mime_type: ctx.upload.mime_type || 'application/pdf'\n  }\n};"
+      },
+      "id": "5df63135-c46a-4d5e-95e1-b8b1070d367f",
+      "name": "Build Storage Download",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.download_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "id": "46e4da3a-6e8c-44fd-9f8e-6902ccfe0533",
+      "name": "Download Student PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1320,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1500
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const item = $input.item;\nconst binary = item.binary || {};\nconst keys = Object.keys(binary);\nif (!keys.length) throw new Error('Supabase Storage did not return a PDF binary.');\nconst binaryKey = keys.includes('data') ? 'data' : keys[0];\nconst file = binary[binaryKey];\nconst mime = String(file.mimeType || 'application/pdf').toLowerCase();\nconst name = String(file.fileName || $('Build Storage Download').item.json.file_name || 'answer.pdf');\nif (mime !== 'application/pdf' && !name.toLowerCase().endsWith('.pdf')) throw new Error(`Expected PDF, got ${mime || name}`);\nreturn { json: { binary_property: binaryKey, file_name: name, mime_type: 'application/pdf' }, binary };"
+      },
+      "id": "f1f94d3b-1f28-4cfd-a7ce-29f01a3048d1",
+      "name": "Validate Student PDF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/files",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.OPENAI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "={{ $('Validate Student PDF').item.json.binary_property }}"
+            },
+            {
+              "parameterType": "formData",
+              "name": "purpose",
+              "value": "user_data"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "aa98bf6e-47ff-40a3-aa33-02e2bd09c5aa",
+      "name": "Upload Student PDF To OpenAI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1760,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "8bfeab47-dd9c-4db1-a114-c25e01ab5a2d",
+              "leftValue": "={{ $json.can_process }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7e768038-71f3-4c1d-b83d-b90c1110eb89",
+      "name": "Quality Acceptable?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2640,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL + '/rest/v1/rpc/rpc_marking_update_upload_status' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ p_upload_id:$('Validate Marking Input').item.json.upload_id, p_processing_status:'reupload_required', p_quality_status:$('Parse Quality + Extracted Answers').item.json.db_quality_status, p_quality_report:$('Parse Quality + Extracted Answers').item.json.quality }) }}",
+        "options": {}
+      },
+      "id": "2fcc42b6-b5ee-43f3-91ec-1eb33cc078b5",
+      "name": "Set Reupload Required RPC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2860,
+        500
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "={{ 'https://api.openai.com/v1/files/' + $('Build Combined PDF Analysis Request').item.json.openai_file_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.OPENAI_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "08f45003-2864-4159-9b96-252e667046cd",
+      "name": "Delete OpenAI File - Reupload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3080,
+        500
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "={{ 'https://api.openai.com/v1/files/' + $('Build Combined PDF Analysis Request').item.json.openai_file_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.OPENAI_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "17f0043f-afdd-49b1-9fb7-ee2c8a59692f",
+      "name": "Delete Temporary OpenAI PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2860,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL + '/rest/v1/rpc/rpc_marking_update_upload_status' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ p_upload_id:$('Validate Marking Input').item.json.upload_id, p_processing_status:'marking', p_quality_status:$('Parse Quality + Extracted Answers').item.json.db_quality_status, p_quality_report:$('Parse Quality + Extracted Answers').item.json.quality }) }}",
+        "options": {}
+      },
+      "id": "41d114b2-b2cc-4e6a-ae38-8752459d5095",
+      "name": "Set Marking RPC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3080,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL + '/rest/v1/rpc/rpc_marking_save_written_results' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({\n  p_attempt_id: $('Validate Marking Input').item.json.attempt_id,\n  p_upload_id: $('Validate Marking Input').item.json.upload_id,\n  p_results: $json.results.map(r => ({\n    question_id: r.question_id,\n    question_number: r.question_number,\n    awarded_marks: r.awarded_marks,\n    max_marks: r.max_marks,\n    feedback: r.feedback,\n    marking_confidence: r.marking_confidence,\n    needs_review: r.needs_review,\n    matched_marking_points: r.matched_marking_points,\n    level_awarded: r.level_awarded\n  }))\n}) }}",
+        "options": {}
+      },
+      "id": "e0197ae1-137c-4ff3-8c44-d7f59c51ad4e",
+      "name": "Save Written Results Bulk RPC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3960,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1200
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL + '/rest/v1/rpc/rpc_marking_finalize_attempt' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ p_attempt_id:$('Validate Marking Input').item.json.attempt_id, p_upload_id:$('Validate Marking Input').item.json.upload_id }) }}",
+        "options": {}
+      },
+      "id": "282ed846-e602-453c-a400-2a70bb62d484",
+      "name": "Finalize Attempt RPC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        4180,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1200
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return {\n  json: {\n    ok: true,\n    attempt_id: $json.attempt_id,\n    status: $json.status,\n    mcq_score: $json.mcq_score,\n    mcq_max_marks: $json.mcq_max_marks,\n    written_score: $json.written_score,\n    written_max_marks: $json.written_max_marks,\n    total_score: $json.total_score,\n    total_max_marks: $json.total_max_marks,\n    percentage: $json.percentage,\n    needs_review: $json.needs_review,\n    ai_usage: $json.ai_usage || null,\n    message: $json.needs_review\n      ? 'Marking completed with one or more answers requiring review.'\n      : 'Marking completed successfully.'\n  }\n};"
+      },
+      "id": "be5f4972-ac82-4972-b094-87fc509ec80f",
+      "name": "Processing Complete",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Commerce College Online \u2014 Written PDF AI Marking v3\n\nOptimized flow:\n1. Validate attempt + upload\n2. Load exact generated assessment / hidden marking schemes\n3. Respond to browser early (`processing`)\n4. Download private PDF from Supabase\n5. Upload temporary PDF to OpenAI\n6. **ONE PDF model read** = quality check + verbatim handwriting transcription\n7. Delete temporary OpenAI file\n8. **TWO text-only marking calls** = Q21\u2013Q30 and Q31\u2013Q35\n9. Save **marks + feedback only** (transcription is not persisted)\n10. Finalize MCQ + Written /100\n11. Calculate token/cost estimate\n\nRequired n8n Variables:\n- `SUPABASE_URL`\n- `SUPABASE_SERVICE_ROLE_KEY`\n- `OPENAI_API_KEY`\n- `N8N_WEBHOOK_SECRET` (optional; must match Next.js env if used)\n\nAll secrets stay server-side.",
+        "height": 360,
+        "width": 820
+      },
+      "id": "7ca9f683-7dd6-47fa-9519-92996799e680",
+      "name": "Workflow Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const fileId = $json.id;\nif (!fileId) throw new Error('OpenAI Files API did not return a file id.');\n\nconst ctx = $('Load Marking Context RPC').item.json;\nconst qs = ctx.written_questions || [];\nif (!qs.length) throw new Error('No written questions found for this assessment.');\n\nconst expected = qs.map(q => ({\n  question_id: q.id,\n  question_number: q.question_number,\n  question_text: q.question_text\n}));\n\nconst prompt = `You are processing a student's handwritten examination answer PDF.\n\nASSESSMENT\n${ctx.assessment.title}\nSubject: ${ctx.assessment.subject_name}\n\nEXPECTED WRITTEN QUESTIONS\n${JSON.stringify(expected)}\n\nPERFORM THESE TWO TASKS IN THIS SINGLE PDF READ.\n\nTASK 1 \u2014 DOCUMENT QUALITY\nDetermine whether the PDF is reliable enough for automated handwriting transcription and marking.\n\nCheck:\n- pages are visible and not badly cropped;\n- orientation is readable;\n- blur is not severe;\n- lighting and contrast are sufficient;\n- glare or shadows do not hide important writing;\n- handwriting is readable enough to transcribe;\n- question numbers or answer labels are reasonably identifiable.\n\nQuality statuses:\nGOOD = all or almost all important content is clearly readable.\nACCEPTABLE = minor issues exist, but answers can still be transcribed reliably.\nREUPLOAD = important content is unreadable, cropped, missing, or too blurred for reliable marking.\n\nTASK 2 \u2014 HANDWRITTEN ANSWER TRANSCRIPTION\nOnly if quality is GOOD or ACCEPTABLE, transcribe the student's answer for every expected written question.\n\nCritical transcription rules:\n- Transcribe what the student actually wrote.\n- Do NOT solve the questions.\n- Do NOT correct, improve, complete, paraphrase, or rewrite the student's answer.\n- Use supplied question text only to match handwriting to the correct question.\n- If no answer is present, status = blank and answer_text = \"\".\n- If partly unclear, keep only readable content, status = low_confidence, and list unclear fragments.\n- If it cannot be transcribed reliably, status = unreadable and do not guess.\n- Return each expected question exactly once when quality is GOOD or ACCEPTABLE.\n- page_numbers should identify where the answer appears when possible.\n- If quality is REUPLOAD, return answers as an empty array. Do not waste tokens attempting a full transcription.\n\nNever invent missing handwriting, missing pages, or student content.\nReturn only the required JSON schema.`;\n\nconst pageSchema = {\n  type: 'object',\n  additionalProperties: false,\n  properties: {\n    page: { type: 'integer', minimum: 1 },\n    status: { type: 'string', enum: ['GOOD', 'ACCEPTABLE', 'REUPLOAD'] },\n    issues: { type: 'array', items: { type: 'string' } }\n  },\n  required: ['page', 'status', 'issues']\n};\n\nconst answerSchema = {\n  type: 'object',\n  additionalProperties: false,\n  properties: {\n    question_id: { type: 'string' },\n    question_number: { type: 'string' },\n    answer_text: { type: 'string' },\n    confidence: { type: 'number', minimum: 0, maximum: 1 },\n    status: { type: 'string', enum: ['readable', 'low_confidence', 'blank', 'unreadable'] },\n    page_numbers: { type: 'array', items: { type: 'integer', minimum: 1 } },\n    unclear_segments: { type: 'array', items: { type: 'string' } }\n  },\n  required: [\n    'question_id',\n    'question_number',\n    'answer_text',\n    'confidence',\n    'status',\n    'page_numbers',\n    'unclear_segments'\n  ]\n};\n\nconst schema = {\n  type: 'object',\n  additionalProperties: false,\n  properties: {\n    quality: {\n      type: 'object',\n      additionalProperties: false,\n      properties: {\n        status: { type: 'string', enum: ['GOOD', 'ACCEPTABLE', 'REUPLOAD'] },\n        can_process: { type: 'boolean' },\n        page_count: { type: 'integer', minimum: 0 },\n        all_pages_visible: { type: 'boolean' },\n        handwriting_readable: { type: 'boolean' },\n        issues: { type: 'array', items: { type: 'string' } },\n        pages: { type: 'array', items: pageSchema },\n        student_message: { type: 'string' }\n      },\n      required: [\n        'status',\n        'can_process',\n        'page_count',\n        'all_pages_visible',\n        'handwriting_readable',\n        'issues',\n        'pages',\n        'student_message'\n      ]\n    },\n    answers: {\n      type: 'array',\n      minItems: 0,\n      maxItems: qs.length,\n      items: answerSchema\n    }\n  },\n  required: ['quality', 'answers']\n};\n\nreturn {\n  json: {\n    openai_file_id: fileId,\n    openai_body: {\n      model: 'gpt-5.6-luna',\n      store: false,\n      reasoning: { effort: 'low' },\n      max_output_tokens: 12000,\n      input: [{\n        role: 'user',\n        content: [\n          { type: 'input_text', text: prompt },\n          { type: 'input_file', file_id: fileId }\n        ]\n      }],\n      text: {\n        format: {\n          type: 'json_schema',\n          name: 'answer_pdf_quality_and_transcription',\n          strict: true,\n          schema\n        }\n      }\n    }\n  }\n};"
+      },
+      "id": "cda79199-bc79-4fac-a16d-ab50b4261b28",
+      "name": "Build Combined PDF Analysis Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/responses",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.openai_body) }}",
+        "options": {}
+      },
+      "id": "3fbb0b83-3886-4ec7-920d-1a998df1d99a",
+      "name": "OpenAI Analyze PDF Once",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2200,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const r = $json;\n\nlet text = '';\nfor (const out of (r.output || [])) {\n  for (const c of (out.content || [])) {\n    if (c.type === 'output_text' && c.text) text += c.text;\n  }\n}\nif (!text) throw new Error('Combined PDF analysis returned no output_text.');\n\nlet parsed;\ntry {\n  parsed = JSON.parse(text);\n} catch (e) {\n  throw new Error('Invalid combined PDF-analysis JSON: ' + e.message);\n}\n\nconst ctx = $('Load Marking Context RPC').item.json;\nconst q = parsed.quality || {};\nq.can_process = q.can_process === true && q.status !== 'REUPLOAD';\nq.db_quality_status =\n  q.status === 'GOOD'\n    ? 'good'\n    : q.status === 'ACCEPTABLE'\n      ? 'acceptable'\n      : 'reupload_required';\n\nlet normalized = [];\n\nif (q.can_process) {\n  const returned = Array.isArray(parsed.answers) ? parsed.answers : [];\n  const byId = new Map(returned.map(a => [String(a.question_id), a]));\n\n  normalized = (ctx.written_questions || []).map(question => {\n    const a = byId.get(String(question.id));\n\n    if (!a) {\n      return {\n        question_id: question.id,\n        question_number: question.question_number,\n        answer_text: '',\n        confidence: 0,\n        status: 'unreadable',\n        page_numbers: [],\n        unclear_segments: ['No transcription returned for this expected question.']\n      };\n    }\n\n    return {\n      question_id: question.id,\n      question_number: question.question_number,\n      answer_text: String(a.answer_text || ''),\n      confidence: Math.max(0, Math.min(1, Number(a.confidence || 0))),\n      status: ['readable', 'low_confidence', 'blank', 'unreadable'].includes(a.status)\n        ? a.status\n        : 'low_confidence',\n      page_numbers: Array.isArray(a.page_numbers) ? a.page_numbers : [],\n      unclear_segments: Array.isArray(a.unclear_segments) ? a.unclear_segments : []\n    };\n  });\n}\n\nreturn {\n  json: {\n    quality: q,\n    db_quality_status: q.db_quality_status,\n    can_process: q.can_process,\n    answers: normalized\n  }\n};"
+      },
+      "id": "4c8a1182-2a2a-4a57-b8bb-0ee4080f19c0",
+      "name": "Parse Quality + Extracted Answers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('Load Marking Context RPC').item.json;\nconst extracted = $('Parse Quality + Extracted Answers').item.json.answers || [];\nconst byId = new Map(extracted.map(a => [String(a.question_id), a]));\n\nconst all = (ctx.written_questions || []).map(q => {\n  const a = byId.get(String(q.id)) || {};\n  return {\n    question_id: q.id,\n    question_number: q.question_number,\n    section: q.section || '',\n    question_type: q.question_type,\n    question_text: q.question_text,\n    max_marks: Number(q.marks || 0),\n    student_answer: String(a.answer_text || ''),\n    extraction_confidence: Number(a.confidence || 0),\n    extraction_status: a.status || 'unreadable',\n    model_answer: q.model_answer,\n    marking_scheme: q.marking_scheme\n  };\n});\n\n// Group 1: short-answer / calculation style questions.\n// Group 2: extended / essay / high-mark questions.\nconst shortGroup = [];\nconst extendedGroup = [];\n\nfor (const item of all) {\n  const isExtended =\n    String(item.section).toUpperCase() === 'C' ||\n    ['essay', 'structured'].includes(String(item.question_type)) ||\n    Number(item.max_marks) > 5;\n\n  (isExtended ? extendedGroup : shortGroup).push(item);\n}\n\nconst groups = [\n  { name: 'short_and_calculation', items: shortGroup },\n  { name: 'extended_and_essay', items: extendedGroup }\n].filter(g => g.items.length > 0);\n\nconst resultItem = {\n  type: 'object',\n  additionalProperties: false,\n  properties: {\n    question_id: { type: 'string' },\n    question_number: { type: 'string' },\n    awarded_marks: { type: 'number', minimum: 0 },\n    max_marks: { type: 'number', minimum: 0 },\n    feedback: { type: 'string' },\n    marking_confidence: { type: 'number', minimum: 0, maximum: 1 },\n    needs_review: { type: 'boolean' },\n    level_awarded: { type: 'string' },\n    matched_marking_points: {\n      type: 'array',\n      items: {\n        type: 'object',\n        additionalProperties: false,\n        properties: {\n          criterion: { type: 'string' },\n          awarded_marks: { type: 'number', minimum: 0 }\n        },\n        required: ['criterion', 'awarded_marks']\n      }\n    }\n  },\n  required: [\n    'question_id',\n    'question_number',\n    'awarded_marks',\n    'max_marks',\n    'feedback',\n    'marking_confidence',\n    'needs_review',\n    'level_awarded',\n    'matched_marking_points'\n  ]\n};\n\nreturn groups.map(group => {\n  const prompt = `You are an examination marker.\n\nASSESSMENT\n${ctx.assessment.title}\nSubject: ${ctx.assessment.subject_name}\n\nMARKING GROUP\n${group.name}\n\nQUESTIONS, STUDENT TRANSCRIPTIONS, MODEL ANSWERS AND MARKING SCHEMES\n${JSON.stringify(group.items)}\n\nMARKING RULES\n- Mark ONLY from the transcribed student_answer. The PDF is not available in this step.\n- Apply each question's own stored marking_scheme and max_marks.\n- Accept academically equivalent wording when it expresses the required meaning.\n- Do not award knowledge the student did not actually write.\n- Do not penalize spelling or grammar unless meaning is changed or explicitly assessed.\n- For calculations, award method/workings marks only where supported by the marking scheme.\n- For level-based essays, use the stored level_descriptors and indicative_content.\n- blank = 0 marks and needs_review=false.\n- unreadable = 0 provisional marks and needs_review=true.\n- For low_confidence extraction, mark only readable content and set needs_review=true if uncertainty could change the score.\n- awarded_marks must remain between 0 and max_marks.\n- Give concise, useful feedback.\n- Return every supplied question exactly once.\n- Do not solve or alter the student's response beyond what is needed to apply the stored marking scheme.\n\nReturn only the required JSON schema.`;\n\n  const schema = {\n    type: 'object',\n    additionalProperties: false,\n    properties: {\n      results: {\n        type: 'array',\n        minItems: group.items.length,\n        maxItems: group.items.length,\n        items: resultItem\n      }\n    },\n    required: ['results']\n  };\n\n  return {\n    json: {\n      marking_group: group.name,\n      openai_body: {\n        model: 'gpt-5.6-luna',\n        store: false,\n        reasoning: { effort: 'low' },\n        max_output_tokens: group.name === 'extended_and_essay' ? 9000 : 7000,\n        input: [{\n          role: 'user',\n          content: [{ type: 'input_text', text: prompt }]\n        }],\n        text: {\n          format: {\n            type: 'json_schema',\n            name: `written_marking_${group.name}`,\n            strict: true,\n            schema\n          }\n        }\n      }\n    }\n  };\n});"
+      },
+      "id": "87ef8abc-4122-40ca-bf68-82ff34a8857f",
+      "name": "Build 2 Text Marking Requests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3300,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/responses",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $vars.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.openai_body) }}",
+        "options": {}
+      },
+      "id": "8b7017ec-8d6d-4186-a9f1-614462e7622d",
+      "name": "OpenAI Mark 2 Text Groups",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3520,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const responses = $input.all();\n\nconst combinedMarking = [];\n\nfor (const item of responses) {\n  const r = item.json || {};\n  let text = '';\n\n  for (const out of (r.output || [])) {\n    for (const c of (out.content || [])) {\n      if (c.type === 'output_text' && c.text) text += c.text;\n    }\n  }\n\n  if (!text) throw new Error('A grouped marking request returned no output_text.');\n\n  let parsed;\n  try {\n    parsed = JSON.parse(text);\n  } catch (e) {\n    throw new Error('Invalid grouped marking JSON: ' + e.message);\n  }\n\n  if (Array.isArray(parsed.results)) combinedMarking.push(...parsed.results);\n}\n\nconst ctx = $('Load Marking Context RPC').item.json;\nconst extracted = $('Parse Quality + Extracted Answers').item.json.answers || [];\n\nconst exById = new Map(extracted.map(a => [String(a.question_id), a]));\nconst markById = new Map(combinedMarking.map(m => [String(m.question_id), m]));\n\nconst results = (ctx.written_questions || []).map(q => {\n  const e = exById.get(String(q.id)) || {\n    answer_text: '',\n    confidence: 0,\n    status: 'unreadable',\n    page_numbers: [],\n    unclear_segments: []\n  };\n\n  const m = markById.get(String(q.id)) || {};\n  const max = Number(q.marks || 0);\n\n  let awarded = Number(m.awarded_marks || 0);\n  if (!Number.isFinite(awarded)) awarded = 0;\n  awarded = Math.max(0, Math.min(max, awarded));\n\n  let needsReview = Boolean(m.needs_review);\n\n  if (e.status === 'blank') {\n    awarded = 0;\n    needsReview = false;\n  }\n\n  if (e.status === 'unreadable') {\n    awarded = 0;\n    needsReview = true;\n  }\n\n  if (e.status === 'low_confidence' && Number(e.confidence || 0) < 0.6) {\n    needsReview = true;\n  }\n\n  return {\n    question_id: q.id,\n    question_number: q.question_number,\n    extracted_answer: String(e.answer_text || ''),\n    extraction_confidence: Math.max(0, Math.min(1, Number(e.confidence || 0))),\n    extraction_status: e.status,\n    page_numbers: Array.isArray(e.page_numbers) ? e.page_numbers : [],\n    unclear_segments: Array.isArray(e.unclear_segments) ? e.unclear_segments : [],\n    awarded_marks: awarded,\n    max_marks: max,\n    feedback: String(\n      m.feedback ||\n      (e.status === 'blank' ? 'No answer submitted.' : 'Answer requires review.')\n    ),\n    marking_confidence: Math.max(\n      0,\n      Math.min(1, Number(m.marking_confidence || 0))\n    ),\n    needs_review: needsReview,\n    matched_marking_points: Array.isArray(m.matched_marking_points)\n      ? m.matched_marking_points\n      : [],\n    level_awarded: String(m.level_awarded || '')\n  };\n});\n\n// Hard validation: make sure every expected written question is represented once.\nif (results.length !== (ctx.written_questions || []).length) {\n  throw new Error(\n    `Expected ${(ctx.written_questions || []).length} written results, got ${results.length}.`\n  );\n}\n\nreturn [{ json: { results } }];"
+      },
+      "id": "66e92a34-c096-4af6-a311-3b77cf171da7",
+      "name": "Merge + Validate 2 Marking Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3740,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Cost estimate uses current configured GPT-5.6 Luna rates. Update these constants if pricing changes.\nconst INPUT_RATE = 0.20;\nconst CACHED_INPUT_RATE = 0.02;\nconst CACHE_WRITE_RATE = 0.25;\nconst OUTPUT_RATE = 1.20;\n\nconst calls = [];\nfor (const item of $('OpenAI Analyze PDF Once').all()) calls.push({ stage: 'pdf_analysis', response: item.json });\n$('OpenAI Mark 2 Text Groups').all().forEach((item, i) => calls.push({ stage: `marking_group_${i + 1}`, response: item.json }));\n\nconst breakdown = calls.map(call => {\n  const response = call.response || {};\n  const usage = response.usage || {};\n  const inputTokens = Number(usage.input_tokens || 0);\n  const cachedTokens = Number(usage.input_tokens_details?.cached_tokens || 0);\n  const cacheWriteTokens = Number(usage.input_tokens_details?.cache_write_tokens || 0);\n  const outputTokens = Number(usage.output_tokens || 0);\n  const reasoningTokens = Number(usage.output_tokens_details?.reasoning_tokens || 0);\n  const totalTokens = Number(usage.total_tokens || inputTokens + outputTokens);\n  const normalInputTokens = Math.max(0, inputTokens - cachedTokens - cacheWriteTokens);\n  const costUsd = (normalInputTokens / 1_000_000) * INPUT_RATE + (cachedTokens / 1_000_000) * CACHED_INPUT_RATE + (cacheWriteTokens / 1_000_000) * CACHE_WRITE_RATE + (outputTokens / 1_000_000) * OUTPUT_RATE;\n  return { stage: call.stage, response_id: response.id || null, model: response.model || null, input_tokens: inputTokens, normal_input_tokens: normalInputTokens, cached_input_tokens: cachedTokens, cache_write_tokens: cacheWriteTokens, output_tokens: outputTokens, reasoning_tokens: reasoningTokens, total_tokens: totalTokens, cost_usd: Number(costUsd.toFixed(6)) };\n});\n\nconst totals = breakdown.reduce((s,c) => ({ input_tokens:s.input_tokens+c.input_tokens, cached_input_tokens:s.cached_input_tokens+c.cached_input_tokens, cache_write_tokens:s.cache_write_tokens+c.cache_write_tokens, output_tokens:s.output_tokens+c.output_tokens, reasoning_tokens:s.reasoning_tokens+c.reasoning_tokens, total_tokens:s.total_tokens+c.total_tokens, cost_usd:s.cost_usd+c.cost_usd }), { input_tokens:0,cached_input_tokens:0,cache_write_tokens:0,output_tokens:0,reasoning_tokens:0,total_tokens:0,cost_usd:0 });\ntotals.cost_usd = Number(totals.cost_usd.toFixed(6));\nreturn { json: { ...$json, ai_usage: { model: 'gpt-5.6-luna', api_calls: breakdown.length, ...totals, estimated_cost_usd: totals.cost_usd, breakdown } } };"
+      },
+      "id": "a2242818-aad6-4f04-9fe2-5e43217fcc4b",
+      "name": "Calculate AI Cost Per Paper",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        100
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Mark Written PDF Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Marking Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Marking Input": {
+      "main": [
+        [
+          {
+            "node": "Load Marking Context RPC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Marking Context RPC": {
+      "main": [
+        [
+          {
+            "node": "Set Quality Checking RPC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Quality Checking RPC": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acknowledge Processing": {
+      "main": [
+        [
+          {
+            "node": "Build Storage Download",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Storage Download": {
+      "main": [
+        [
+          {
+            "node": "Download Student PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Student PDF": {
+      "main": [
+        [
+          {
+            "node": "Validate Student PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Student PDF": {
+      "main": [
+        [
+          {
+            "node": "Upload Student PDF To OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Student PDF To OpenAI": {
+      "main": [
+        [
+          {
+            "node": "Build Combined PDF Analysis Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Combined PDF Analysis Request": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Analyze PDF Once",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Analyze PDF Once": {
+      "main": [
+        [
+          {
+            "node": "Parse Quality + Extracted Answers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Quality + Extracted Answers": {
+      "main": [
+        [
+          {
+            "node": "Quality Acceptable?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quality Acceptable?": {
+      "main": [
+        [
+          {
+            "node": "Delete Temporary OpenAI PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set Reupload Required RPC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Reupload Required RPC": {
+      "main": [
+        [
+          {
+            "node": "Delete OpenAI File - Reupload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Temporary OpenAI PDF": {
+      "main": [
+        [
+          {
+            "node": "Set Marking RPC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Marking RPC": {
+      "main": [
+        [
+          {
+            "node": "Build 2 Text Marking Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build 2 Text Marking Requests": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Mark 2 Text Groups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Mark 2 Text Groups": {
+      "main": [
+        [
+          {
+            "node": "Merge + Validate 2 Marking Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge + Validate 2 Marking Results": {
+      "main": [
+        [
+          {
+            "node": "Save Written Results Bulk RPC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Written Results Bulk RPC": {
+      "main": [
+        [
+          {
+            "node": "Finalize Attempt RPC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Attempt RPC": {
+      "main": [
+        [
+          {
+            "node": "Calculate AI Cost Per Paper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate AI Cost Per Paper": {
+      "main": [
+        [
+          {
+            "node": "Processing Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c2f3883f-43de-4f7c-81c2-3e322d2240c1",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
